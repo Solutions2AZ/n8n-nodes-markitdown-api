@@ -1,6 +1,7 @@
 import type {
 	IDataObject,
 	IExecuteFunctions,
+	IBinaryKeyData,
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
@@ -13,7 +14,7 @@ interface MarkitdownCredentials {
 }
 
 interface ConvertResponse {
-	markdown?: unknown;
+	markdown?: string;
 	metadata?: IDataObject;
 }
 
@@ -29,11 +30,41 @@ function normalizeBaseUrl(baseUrl: string): string {
 
 function extractErrorMessage(error: unknown): string {
 	if (error instanceof Error) {
-		const response = (error as Error & { response?: { body?: IDataObject; data?: IDataObject } }).response;
-		const detail = response?.body?.detail ?? response?.data?.detail;
+		const err = error as Error & {
+			response?: {
+				body?: unknown;
+				data?: unknown;
+				status?: number;
+				statusText?: string;
+			};
+		};
 
-		if (detail) {
-			return typeof detail === 'string' ? detail : JSON.stringify(detail);
+		const response = err.response;
+
+		if (response) {
+			let body = response.body ?? response.data;
+
+			if (typeof body === 'string') {
+				try {
+					body = JSON.parse(body);
+				} catch {
+					// body is not JSON
+				}
+			}
+
+			const detail = (body as IDataObject | undefined)?.detail;
+
+			if (detail) {
+				return typeof detail === 'string'
+					? detail
+					: Array.isArray(detail)
+						? detail.map((d) => (typeof d === 'object' ? JSON.stringify(d) : String(d))).join('; ')
+						: JSON.stringify(detail);
+			}
+
+			if (response.status) {
+				return `API returned ${response.status} ${response.statusText ?? ''}`.trim();
+			}
 		}
 
 		return error.message;
@@ -83,6 +114,7 @@ export class Markitdown implements INodeType {
 				default: 'data',
 				required: true,
 				description: 'Name of the binary property containing the file to convert',
+				hint: 'Use "File" as Response Format in the HTTP Request node, then the binary field is "data"',
 			},
 			{
 				displayName: 'Output Field',
@@ -149,7 +181,17 @@ export class Markitdown implements INodeType {
 				const options = this.getNodeParameter('options', itemIndex, {}) as IDataObject;
 
 				const binaryData = this.helpers.assertBinaryData(itemIndex, inputBinaryField);
+
 				const fileBuffer = await this.helpers.getBinaryDataBuffer(itemIndex, inputBinaryField);
+
+				if (fileBuffer.length === 0) {
+					throw new NodeOperationError(
+						this.getNode(),
+						`The binary data in field "${inputBinaryField}" is empty. Make sure the previous node produced a valid file.`,
+						{ itemIndex },
+					);
+				}
+
 				const timeout = Number(options.timeout ?? 120000);
 				const failOnEmptyOutput = options.failOnEmptyOutput !== false;
 				const keepInputBinary = options.keepInputBinary === true;
@@ -159,7 +201,7 @@ export class Markitdown implements INodeType {
 					headers['x-api-key'] = credentials.apiKey;
 				}
 
-				const response = (await this.helpers.httpRequest({
+				const responseBody = (await this.helpers.httpRequest({
 					method: 'POST',
 					url: `${baseUrl}/v1/convert`,
 					headers,
@@ -172,20 +214,34 @@ export class Markitdown implements INodeType {
 							},
 						},
 					},
-					json: true,
 					timeout,
-				} as never)) as ConvertResponse;
+				} as never)) as unknown;
+
+				let response: ConvertResponse;
+				try {
+					response = JSON.parse(typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody)) as ConvertResponse;
+				} catch {
+					throw new NodeOperationError(
+						this.getNode(),
+						`The API at ${baseUrl}/v1/convert returned an invalid response. Verify that the Base URL points to a running markitdown-api service.`,
+						{ itemIndex },
+					);
+				}
 
 				if (typeof response.markdown !== 'string') {
-					throw new NodeOperationError(this.getNode(), 'Invalid API response: markdown is missing', {
-						itemIndex,
-					});
+					throw new NodeOperationError(
+						this.getNode(),
+						'Invalid API response: the "markdown" field is missing in the response body.',
+						{ itemIndex },
+					);
 				}
 
 				if (failOnEmptyOutput && response.markdown.trim().length === 0) {
-					throw new NodeOperationError(this.getNode(), 'MarkItDown returned empty Markdown', {
-						itemIndex,
-					});
+					throw new NodeOperationError(
+						this.getNode(),
+						'MarkItDown returned empty Markdown. The file may not contain extractable text or the format may be unsupported.',
+						{ itemIndex },
+					);
 				}
 
 				const json: IDataObject = {
@@ -197,9 +253,13 @@ export class Markitdown implements INodeType {
 					json.markitdownMetadata = response.metadata ?? {};
 				}
 
+				const binary: IBinaryKeyData | undefined = keepInputBinary
+					? items[itemIndex].binary
+					: undefined;
+
 				returnData.push({
 					json,
-					binary: keepInputBinary ? items[itemIndex].binary : undefined,
+					binary,
 					pairedItem: {
 						item: itemIndex,
 					},

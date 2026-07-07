@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import logging
 import os
 import shutil
 import tempfile
@@ -38,6 +39,12 @@ class Settings:
 settings = Settings()
 conversion_semaphore = asyncio.Semaphore(settings.concurrency)
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("markitdown-api")
+
 app = FastAPI(
     title="MarkItDown API",
     version="0.1.0",
@@ -65,7 +72,7 @@ async def require_api_key(request: Request) -> None:
     if provided != settings.api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key",
+            detail="Invalid or missing API key. Send it via the 'x-api-key' header or 'Authorization: Bearer <key>'.",
         )
 
 
@@ -74,7 +81,7 @@ async def health() -> dict[str, Any]:
     if shutil.which("markitdown") is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="markitdown command not found",
+            detail="markitdown command not found in the container. Check the Docker image build.",
         )
 
     return {
@@ -93,13 +100,23 @@ async def convert_file(file: UploadFile = File(...)) -> dict[str, Any]:
     input_path: str | None = None
     filename = Path(file.filename or "document").name or "document"
 
+    logger.info("Convert request: filename=%s contentType=%s", filename, file.content_type)
+
     try:
         input_path, size = await _save_upload(file, filename)
 
         async with conversion_semaphore:
-            markdown = await _convert_with_markitdown(input_path)
+            markdown = await _convert_with_markitdown(input_path, filename)
 
         duration_ms = round((time.perf_counter() - started_at) * 1000)
+
+        logger.info(
+            "Convert OK: filename=%s size=%d durationMs=%d chars=%d",
+            filename,
+            size,
+            duration_ms,
+            len(markdown),
+        )
 
         return {
             "markdown": markdown,
@@ -115,9 +132,10 @@ async def convert_file(file: UploadFile = File(...)) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("Convert FAILED: filename=%s error=%s", filename, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Conversion failed: {exc}",
+            detail=f"Conversion failed for '{filename}': {exc}",
         ) from exc
     finally:
         await file.close()
@@ -142,7 +160,10 @@ async def _save_upload(file: UploadFile, filename: str) -> tuple[str, int]:
                 if total > settings.max_upload_bytes:
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"File exceeds MAX_UPLOAD_BYTES ({settings.max_upload_bytes})",
+                        detail=(
+                            f"File '{filename}' exceeds MAX_UPLOAD_BYTES "
+                            f"({settings.max_upload_bytes} bytes). Received {total} bytes so far."
+                        ),
                     )
 
                 output.write(chunk)
@@ -150,7 +171,7 @@ async def _save_upload(file: UploadFile, filename: str) -> tuple[str, int]:
         if total == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded file is empty",
+                detail=f"Uploaded file '{filename}' is empty (0 bytes).",
             )
 
         return path, total
@@ -159,7 +180,7 @@ async def _save_upload(file: UploadFile, filename: str) -> tuple[str, int]:
         raise
 
 
-async def _convert_with_markitdown(input_path: str) -> str:
+async def _convert_with_markitdown(input_path: str, filename: str) -> str:
     fd, output_path = tempfile.mkstemp(prefix="markitdown-output-", suffix=".md")
     os.close(fd)
 
@@ -181,14 +202,34 @@ async def _convert_with_markitdown(input_path: str) -> str:
         except asyncio.TimeoutError as exc:
             process.kill()
             await process.communicate()
+            logger.error(
+                "Convert TIMEOUT: filename=%s timeout=%ds",
+                filename,
+                settings.conversion_timeout_seconds,
+            )
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"Conversion exceeded {settings.conversion_timeout_seconds} seconds",
+                detail=(
+                    f"Conversion of '{filename}' exceeded the configured timeout "
+                    f"of {settings.conversion_timeout_seconds} seconds."
+                ),
             ) from exc
 
         if process.returncode != 0:
             error = stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(error or f"markitdown exited with code {process.returncode}")
+            logger.error(
+                "Convert EXIT CODE %d: filename=%s stderr=%s",
+                process.returncode,
+                filename,
+                error,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"markitdown could not convert '{filename}'. "
+                    f"Exit code {process.returncode}: {error or 'no error output'}"
+                ),
+            )
 
         output_file = Path(output_path)
         if output_file.exists() and output_file.stat().st_size > 0:
