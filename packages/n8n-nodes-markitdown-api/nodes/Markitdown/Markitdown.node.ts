@@ -28,45 +28,35 @@ function normalizeBaseUrl(baseUrl: string): string {
 	return normalized;
 }
 
+function sanitizeFilename(filename: string): string {
+	return filename.replace(/[\r\n"]/g, '_').slice(0, 255) || 'document';
+}
+
+function buildMultipartBody(
+	fieldName: string,
+	fileBuffer: Buffer,
+	filename: string,
+	contentType: string,
+): { body: Buffer; contentTypeHeader: string } {
+	const boundary = `----n8nMarkitdown${Date.now()}${Math.random().toString(16).slice(2)}`;
+
+	const header = Buffer.from(
+		`--${boundary}\r\n` +
+			`Content-Disposition: form-data; name="${fieldName}"; filename="${sanitizeFilename(filename)}"\r\n` +
+			`Content-Type: ${contentType}\r\n\r\n`,
+		'utf-8',
+	);
+
+	const footer = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf-8');
+
+	return {
+		body: Buffer.concat([header, fileBuffer, footer]),
+		contentTypeHeader: `multipart/form-data; boundary=${boundary}`,
+	};
+}
+
 function extractErrorMessage(error: unknown): string {
 	if (error instanceof Error) {
-		const err = error as Error & {
-			response?: {
-				body?: unknown;
-				data?: unknown;
-				status?: number;
-				statusText?: string;
-			};
-		};
-
-		const response = err.response;
-
-		if (response) {
-			let body = response.body ?? response.data;
-
-			if (typeof body === 'string') {
-				try {
-					body = JSON.parse(body);
-				} catch {
-					// body is not JSON
-				}
-			}
-
-			const detail = (body as IDataObject | undefined)?.detail;
-
-			if (detail) {
-				return typeof detail === 'string'
-					? detail
-					: Array.isArray(detail)
-						? detail.map((d) => (typeof d === 'object' ? JSON.stringify(d) : String(d))).join('; ')
-						: JSON.stringify(detail);
-			}
-
-			if (response.status) {
-				return `API returned ${response.status} ${response.statusText ?? ''}`.trim();
-			}
-		}
-
 		return error.message;
 	}
 
@@ -196,39 +186,101 @@ export class Markitdown implements INodeType {
 				const failOnEmptyOutput = options.failOnEmptyOutput !== false;
 				const keepInputBinary = options.keepInputBinary === true;
 
-				const headers: IDataObject = {};
+				const filename = binaryData.fileName ?? 'document';
+				const mimeType = binaryData.mimeType ?? 'application/octet-stream';
+
+				const { body: multipartBody, contentTypeHeader } = buildMultipartBody(
+					'file',
+					fileBuffer,
+					filename,
+					mimeType,
+				);
+
+				const requestHeaders: Record<string, string> = {
+					'Content-Type': contentTypeHeader,
+				};
+
 				if (credentials.apiKey) {
-					headers['x-api-key'] = credentials.apiKey;
+					requestHeaders['x-api-key'] = credentials.apiKey;
 				}
 
-				const responseBody = (await this.helpers.httpRequest({
-					method: 'POST',
-					url: `${baseUrl}/v1/convert`,
-					headers,
-					formData: {
-						file: {
-							value: fileBuffer,
-							options: {
-								filename: binaryData.fileName ?? 'document',
-								contentType: binaryData.mimeType ?? 'application/octet-stream',
-							},
-						},
-					},
-					timeout,
-				} as never)) as unknown;
+				const controller = new AbortController();
+				const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-				let response: ConvertResponse;
+				let response: Response;
 				try {
-					response = JSON.parse(typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody)) as ConvertResponse;
-				} catch {
+					response = await fetch(`${baseUrl}/v1/convert`, {
+						method: 'POST',
+						headers: requestHeaders,
+						body: multipartBody,
+						signal: controller.signal,
+					});
+				} catch (fetchError) {
+					if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Request to ${baseUrl}/v1/convert timed out after ${timeout}ms. Check that the markitdown-api service is running and reachable.`,
+							{ itemIndex },
+						);
+					}
 					throw new NodeOperationError(
 						this.getNode(),
-						`The API at ${baseUrl}/v1/convert returned an invalid response. Verify that the Base URL points to a running markitdown-api service.`,
+						`Could not connect to ${baseUrl}/v1/convert. Verify the Base URL in your credentials and that the markitdown-api service is running. Error: ${extractErrorMessage(fetchError)}`,
+						{ itemIndex },
+					);
+				} finally {
+					clearTimeout(timeoutId);
+				}
+
+				const responseText = await response.text();
+
+				if (!response.ok) {
+					let detail = responseText;
+					try {
+						const parsed = JSON.parse(responseText) as IDataObject;
+						const d = parsed.detail;
+						if (d) {
+							detail = typeof d === 'string' ? d : JSON.stringify(d);
+						}
+					} catch {
+						// responseText is not JSON
+					}
+
+					if (response.status === 401) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Authentication failed (401). Check that the API Key in your credentials matches the MARKITDOWN_API_KEY of the markitdown-api service.`,
+							{ itemIndex },
+						);
+					}
+
+					if (response.status === 413) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`File is too large (413). The markitdown-api service rejected the file. Increase MAX_UPLOAD_BYTES if needed.`,
+							{ itemIndex },
+						);
+					}
+
+					throw new NodeOperationError(
+						this.getNode(),
+						`API error ${response.status} from ${baseUrl}/v1/convert: ${detail}`,
 						{ itemIndex },
 					);
 				}
 
-				if (typeof response.markdown !== 'string') {
+				let parsedResponse: ConvertResponse;
+				try {
+					parsedResponse = JSON.parse(responseText) as ConvertResponse;
+				} catch {
+					throw new NodeOperationError(
+						this.getNode(),
+						`The API at ${baseUrl}/v1/convert returned an invalid JSON response. Verify that the Base URL points to a running markitdown-api service.`,
+						{ itemIndex },
+					);
+				}
+
+				if (typeof parsedResponse.markdown !== 'string') {
 					throw new NodeOperationError(
 						this.getNode(),
 						'Invalid API response: the "markdown" field is missing in the response body.',
@@ -236,7 +288,7 @@ export class Markitdown implements INodeType {
 					);
 				}
 
-				if (failOnEmptyOutput && response.markdown.trim().length === 0) {
+				if (failOnEmptyOutput && parsedResponse.markdown.trim().length === 0) {
 					throw new NodeOperationError(
 						this.getNode(),
 						'MarkItDown returned empty Markdown. The file may not contain extractable text or the format may be unsupported.',
@@ -246,11 +298,11 @@ export class Markitdown implements INodeType {
 
 				const json: IDataObject = {
 					...items[itemIndex].json,
-					[outputField]: response.markdown,
+					[outputField]: parsedResponse.markdown,
 				};
 
 				if (includeMetadata) {
-					json.markitdownMetadata = response.metadata ?? {};
+					json.markitdownMetadata = parsedResponse.metadata ?? {};
 				}
 
 				const binary: IBinaryKeyData | undefined = keepInputBinary
@@ -276,6 +328,10 @@ export class Markitdown implements INodeType {
 						},
 					});
 					continue;
+				}
+
+				if (error instanceof NodeOperationError) {
+					throw error;
 				}
 
 				throw new NodeOperationError(this.getNode(), extractErrorMessage(error), {
