@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  node:
+    name: n8n node
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/n8n-nodes-markitdown-api
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Check npm package
+        run: npm pack --dry-run
+
+  api:
+    name: markitdown-api
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check Python syntax
+        run: python -m py_compile services/markitdown-api/app/main.py
+
+      - name: Check Docker Compose config
+        run: docker compose -f docker-compose.example.yml config

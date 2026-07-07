@@ -1,0 +1,57 @@
+{
+  "name": "n8n-nodes-markitdown-api",
+  "version": "0.1.0",
+  "description": "n8n community node for a self-hosted MarkItDown API",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "markitdown",
+    "markdown",
+    "document-conversion"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Solutions2AZ"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Solutions2AZ/n8n-nodes-markitdown-api.git"
+  },
+  "homepage": "https://github.com/Solutions2AZ/n8n-nodes-markitdown-api#readme",
+  "bugs": {
+    "url": "https://github.com/Solutions2AZ/n8n-nodes-markitdown-api/issues"
+  },
+  "engines": {
+    "node": ">=18.10"
+  },
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc && node scripts/copy-icons.js",
+    "dev": "tsc --watch",
+    "format": "prettier credentials nodes --write",
+    "lint": "tsc --noEmit",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/MarkitdownApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Markitdown/Markitdown.node.js"
+    ]
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "n8n-workflow": "^1.82.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2"
+  }
+}

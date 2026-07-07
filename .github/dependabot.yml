@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /packages/n8n-nodes-markitdown-api
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /services/markitdown-api
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

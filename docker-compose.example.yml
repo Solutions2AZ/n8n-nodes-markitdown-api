@@ -1,0 +1,27 @@
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_COMMUNITY_PACKAGES_ENABLED=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      markitdown-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  markitdown-api:
+    image: ghcr.io/solutions2az/markitdown-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - MARKITDOWN_API_KEY=change-me
+      - MAX_UPLOAD_BYTES=52428800
+      - CONVERSION_TIMEOUT_SECONDS=120
+      - MARKITDOWN_CONCURRENCY=2
+    restart: unless-stopped
+
+volumes:
+  n8n_data:
