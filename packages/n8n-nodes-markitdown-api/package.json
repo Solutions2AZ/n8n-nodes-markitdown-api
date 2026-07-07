@@ -48,9 +48,14 @@
   "peerDependencies": {
     "n8n-workflow": "*"
   },
+  "peerDependenciesMeta": {
+    "n8n-workflow": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "n8n-workflow": "^1.82.0",
+    "n8n-workflow": "1.120.0",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2"
   }
