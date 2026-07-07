@@ -55,7 +55,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "n8n-workflow": "1.120.0",
+    "n8n-workflow": "1.120.20",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2"
   }
